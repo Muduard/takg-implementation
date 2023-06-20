@@ -4,3 +4,5 @@ data
 res1.txt
 res2.txt
 Untitled.ipynb
+.idea
+__pycache__
