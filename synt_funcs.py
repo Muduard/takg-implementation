@@ -2,18 +2,20 @@ import torch
 from FCN import FCN_OPT
 
 class MLP_benchmark:
-  def __init__(self):
-    lr_bounds = [10 ** (-6), 1]
+  def __init__(self, n_fidel):
+    lr_bounds = [-6, 0]
     dropout_rate_bounds = [0, 1]
     batch_size_bounds = [32, 256]
     n_units_bounds = [100, 1000]
-    epochs = [0.6, 0.6]
-    train_size = [5500, 5500]
+    epochs = [10, 10]
+    train_size = [1000, 5500]
     self.bounds = torch.tensor([lr_bounds, dropout_rate_bounds, batch_size_bounds, n_units_bounds, epochs, train_size])
+    self.n_fidel = n_fidel
 
-  def objective(self, x):
-    hyperparams = x #* (self.bounds[:, 1] - self.bounds[:, 0]) + self.bounds[:, 0]
+  def objective(self, x, bounds):
+    hyperparams = x * (bounds[:, 1] - bounds[:, 0]) + bounds[:, 0]
     hyperparams = hyperparams.tolist()
+    hyperparams[0] = 10**hyperparams[0]
     print(*hyperparams)
     net = FCN_OPT(*hyperparams, val_size=5000, device='cuda:0')
     net.train()
@@ -21,6 +23,13 @@ class MLP_benchmark:
     print(f"val_err: {val_err}")
     return val_err
 
+  def cost(self, x):
+    epochs = float(self.bounds[-2][1])
+    if self.n_fidel == 2:
+        epochs *= x[-2]
+    train_size = (x[-1] * self.bounds[-1][1] + self.bounds[-1][0])
+    cost = (epochs * train_size) / ((self.bounds[-1][1]) * self.bounds[-2][1])
+    return cost
 
 class Branin_benchmark:
 
@@ -29,7 +38,7 @@ class Branin_benchmark:
     self.x_obj = (torch.tensor([-3.14, 12.28]), torch.tensor([3.14, 2.28]), torch.tensor([9.42, 2.48]))
     self.y_obj = torch.tensor(0.397887)
 
-  def objective(self, x):
+  def objective(self, x, bounds):
     x1 = x[0]
     x2 = x[1]
     s1 = x[2]

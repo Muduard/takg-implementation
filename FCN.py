@@ -42,8 +42,10 @@ class FCN_OPT():
         # Load MNIST train
         ds_train = MNIST(root='./data', train=True, download=True, transform=transform)
         batch_size = int(batch_size)
+        dropout_rate = max(min(dropout_rate, 0.999), 0.001)
+        learning_rate = max(min(learning_rate, 0.999), 0.001)
         n_units = int(n_units)
-        epochs = int(20 * epochs)
+        epochs = int(epochs)
         train_size = int(train_size)
         assert train_size <= len(ds_train) - val_size
         if train_size == 0:

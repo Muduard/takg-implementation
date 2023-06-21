@@ -1,0 +1,8 @@
+TAKG fidelity 1
+ys: [array(0.00757576, dtype=float32)]
+xs:tensor([0.2943, 0.2909, 0.0285, 0.9445, 0.1152, 0.3511])
+cost:2.0548818111419678
+
+kg e ei riescono a fare fidelity 1 in < 1 cost
+
+TAKG forse riesce a fare fidelity 2 in tante iterazioni
