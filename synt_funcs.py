@@ -7,8 +7,8 @@ class MLP_benchmark:
     dropout_rate_bounds = [0, 1]
     batch_size_bounds = [32, 256]
     n_units_bounds = [100, 1000]
-    epochs = [10, 10]
-    train_size = [1000, 5500]
+    epochs = [1, 20]
+    train_size = [10, 5500]
     self.bounds = torch.tensor([lr_bounds, dropout_rate_bounds, batch_size_bounds, n_units_bounds, epochs, train_size])
     self.n_fidel = n_fidel
 
@@ -16,17 +16,16 @@ class MLP_benchmark:
     hyperparams = x * (bounds[:, 1] - bounds[:, 0]) + bounds[:, 0]
     hyperparams = hyperparams.tolist()
     hyperparams[0] = 10**hyperparams[0]
-    print(*hyperparams)
-    net = FCN_OPT(*hyperparams, val_size=5000, device='cuda:0')
+    net = FCN_OPT(*hyperparams, device='cuda:0')
     net.train()
     val_err = net.evaluate()
-    print(f"val_err: {val_err}")
     return val_err
 
   def cost(self, x):
     epochs = float(self.bounds[-2][1])
     if self.n_fidel == 2:
         epochs *= x[-2]
+        epochs += self.bounds[-2][0]
     train_size = (x[-1] * self.bounds[-1][1] + self.bounds[-1][0])
     cost = (epochs * train_size) / ((self.bounds[-1][1]) * self.bounds[-2][1])
     return cost

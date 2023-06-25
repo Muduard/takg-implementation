@@ -1,15 +1,11 @@
-# Start with some standard imports.
 import numpy as np
-import matplotlib.pyplot as plt
-from functools import reduce
 import torch
 from torchvision.datasets import MNIST
 from torch.utils.data import Subset
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
-from tqdm import tqdm
-from sklearn.metrics import accuracy_score, classification_report
+
 
 
 class MLP(nn.Module):
@@ -38,22 +34,16 @@ transform = transforms.Compose([
 
 class FCN_OPT():
 
-    def __init__(self, learning_rate, dropout_rate, batch_size, n_units, epochs, train_size, val_size, device):
+    def __init__(self, learning_rate, dropout_rate, batch_size, n_units, epochs, train_size, device):
         # Load MNIST train
         ds_train = MNIST(root='./data', train=True, download=True, transform=transform)
-        batch_size = int(batch_size)
+        ds_val = MNIST(root='./data', train=False, download=True, transform=transform)
+        batch_size = max(int(batch_size), 1)
         dropout_rate = max(min(dropout_rate, 0.999), 0.001)
         learning_rate = max(min(learning_rate, 0.999), 0.001)
-        n_units = int(n_units)
-        epochs = int(epochs)
-        train_size = int(train_size)
-        assert train_size <= len(ds_train) - val_size
-        if train_size == 0:
-            train_size = len(ds_train) - val_size
-        # Split train into train and validation
-        I = np.random.permutation(len(ds_train))
-        ds_val = Subset(ds_train, I[:val_size])
-        ds_train = Subset(ds_train, I[val_size:val_size + train_size])
+        n_units = max(int(n_units), 10)
+        epochs = max(int(epochs), 1)
+        train_size = max(int(train_size), 100)
         self.learning_rate = learning_rate
         self.dropout_rate = dropout_rate
         self.batch_size = batch_size
@@ -68,7 +58,7 @@ class FCN_OPT():
         self.opt = torch.optim.Adam(params=self.model.parameters(), lr=self.learning_rate)
 
     def train(self):
-        for epoch in tqdm(range(self.epochs), desc=f'Training'):
+        for epoch in range(self.epochs):
             self.train_epoch(epoch)
 
     # Function to train a model for a single epoch over the data loader
@@ -92,7 +82,7 @@ class FCN_OPT():
         predictions = np.zeros(len(self.dl_val), dtype=int)
         gts = np.zeros(len(self.dl_val), dtype=int)
         i = 0
-        for (xs, ys) in tqdm(self.dl_val, desc='Evaluating', leave=False):
+        for (xs, ys) in self.dl_val:
             xs = xs.to(self.device)
             preds = torch.argmax(self.model(xs), dim=1)
             gts[i] = ys[0]
@@ -101,16 +91,3 @@ class FCN_OPT():
         val_error = torch.tensor(1 - (predictions == gts).sum() / len(gts)).unsqueeze(0)
         # Return validation error
         return val_error
-
-'''
-model = FCN_OPT(learning_rate=0.02,
-                dropout_rate=0.2,
-                batch_size=128,
-                n_units=800,
-                epochs=1,
-                train_size=0,
-                val_size=5000,
-                device='cuda:0')
-model.train()
-print(model.evaluate())
-'''

@@ -1,46 +1,19 @@
-import math
-
-import numpy as np
 import torch
 import gpytorch
-from matplotlib import pyplot as plt
-
-import time
 from scipy.stats import norm
 from gpytorch.kernels import RBFKernel
-from torchmin import minimize, minimize_constr
+from torchmin import minimize_constr
 from tqdm import tqdm
 from copy import deepcopy
-from FCN import FCN_OPT
-
-class MyMean(gpytorch.means.Mean):
-    def __init__(self):
-        super().__init__()
-        self.register_parameter(name="constant", parameter=torch.nn.Parameter(torch.zeros(1)))
-
-    def forward(self, input):
-        return self.constant.expand(input.size(0), 1)
-
-class CustomRBF(gpytorch.kernels.Kernel):
-    has_lengthscale = True
-    # We will register the parameter when initializing the kernel
-
-
-    # this is the kernel function
-    def forward(self, x1, x2, **params):
-        return torch.exp(-1/2 * self.covar_dist(x1, x2))
 
 
 class ExactGPModel(gpytorch.models.ExactGP):
     def __init__(self, train_x, train_y, likelihood, l0):
         super(ExactGPModel, self).__init__(train_x, train_y, likelihood)
         self.mean_module = gpytorch.means.ConstantMean()
-        #kernel = gpytorch.kernels.ScaleKernel(RBFKernel(active_dims=tuple(range(2))) * RBFKernel(active_dims=tuple([2])))
-
-        kernel = RBFKernel(active_dims=tuple(range(4)))
+        kernel = RBFKernel(active_dims=tuple(range(4)),has_lengthscale = True, ard_num_dims=4)
         if not l0:
-            kernel = kernel * RBFKernel(active_dims=tuple([4])) * RBFKernel(active_dims=tuple([5]))
-        #kernel = CustomRBF()
+            kernel = kernel * RBFKernel(active_dims=tuple([4]), has_lengthscale = True,ard_num_dims=1) * RBFKernel(active_dims=tuple([5]),has_lengthscale = True,ard_num_dims=1)
         self.covar_module = kernel
 
     def forward(self, x):
@@ -57,7 +30,7 @@ class BayesianOptimization:
         self.ln_likelihood = gpytorch.likelihoods.GaussianLikelihood().to(self.device)
         self.training_iter = 50
         if acq_func == "ei":
-            self.acquisition_function = self.ei
+            self.acquisition_function = self.ei_acq
         elif acq_func == "takg":
             self.acquisition_function = self.takg
         elif acq_func == "kg":
@@ -72,8 +45,6 @@ class BayesianOptimization:
         self.cost = cost
         # Real Values
         self.g = [objective(x_i, self.bounds) for i, x_i in enumerate(torch.unbind(self.x, dim=0), 0)]
-
-        #self.g = torch.stack(, dim=0).squeeze().to(self.device)
         # Noisy observations
         self.g = torch.tensor(self.g,device=self.device)
         self.g = self.g.float()
@@ -81,7 +52,6 @@ class BayesianOptimization:
         self.model = ExactGPModel(self.x, self.y, self.likelihood, False).to(self.device)
         self.l0_model = ExactGPModel(self.x[:, :-n_fidel], self.y, self.l0_likelihood, True).to(self.device)
         self.ln_model =ExactGPModel(self.x, self.y, self.ln_likelihood, False).to(self.device)
-        #self.original_model = deepcopy(self.model)
         self.max_mean = 0.0
         self.best_y = torch.argmin(self.y)
         self.best_x = self.x[self.best_y]
@@ -96,13 +66,19 @@ class BayesianOptimization:
             observed_pred = likelihood(model(x))
         return observed_pred
 
-    def ei(self):
+    def ei_acq(self):
+        # Choose point with maximum acquisition function value
+        x = self.generate_x(1)
+        bounds = {"lb": torch.zeros(self.bounds[:, 0].shape), "ub": torch.ones(self.bounds[:, 1].shape)}
+        x_next = minimize_constr(self.ei, x, bounds=bounds)['x']  # x_values[torch.argmax(y_values)]
+        return x_next
+
+    def ei(self, x_values):
         # Define acquisition function
-        def max0(x):
-            return max(x, 0)
+        def max0(f):
+            return max(f, 0)
 
         # Compute acquisition function for each point in search space
-        x_values = self.generate_x(4)
         posterior = self.compute_posterior(x_values, self.model, self.likelihood)
         mean = posterior.mean
         std = posterior.stddev
@@ -116,12 +92,7 @@ class BayesianOptimization:
         pdf_z = torch.tensor(norm.pdf(z.detach().numpy()), device=self.device)
         cdf_z = torch.tensor(norm.cdf(z.detach().numpy()), device=self.device)
         y_values = improv_plus + std * pdf_z - torch.abs(improv) * cdf_z
-        #
-
-        # Choose point with maximum acquisition function value
-        x_next = x_values[torch.argmax(y_values)]
-
-        return x_next.unsqueeze(0)
+        return -y_values
 
     def kg(self):
         return self.get_x_from_kg()
@@ -146,16 +117,20 @@ class BayesianOptimization:
 
     def kg_computation(self, x):
 
-        # Simulate y_n+1 and get posteriori sample
-        mu_n1 = torch.zeros(10)
-        mu_n1 = self.model(x).rsample(mu_n1.shape)
+        # Simulate y_n+1 and get current mean
+        mu_n1 = self.compute_mean(x)
         mu_n1 = torch.tensor(list(map(lambda x: x if x > self.max_mean else self.max_mean, mu_n1)))
         kg = (mu_n1 - self.max_mean)
 
         return kg.mean()
 
-
     def sample_gradient(self, x1):
+        x1.requires_grad_(True)
+        y = self.sample_posterior(x1)
+        a = torch.autograd.grad(outputs=y, inputs=x1, allow_unused=True)
+        return a[0]
+
+    def sample_l0_gradient(self, x1):
         x1.requires_grad_(True)
         mean = self.sample_l0_posterior(x1)
         a = torch.autograd.grad(outputs=mean, inputs=x1, allow_unused=True)
@@ -165,38 +140,30 @@ class BayesianOptimization:
     def kg_gradient(self, x, J=2):
         Gs = []
         for j in range(1, J):
-            y1 = self.predict(x, 1, self.model, self.likelihood)
+            y1 = self.sample_posterior(x)
 
             x1 = self.infer_x1(y1)
 
             G = self.sample_gradient(x1)
             # Unpack result
-
             Gs.append([G[0][0], G[0][1], G[0][2]])
         Gs = torch.tensor(Gs, device=self.device)
         return Gs.mean()
 
-    def get_x_from_kg(self, R=10, T=10 ** 2, a=4, J=10 ** 3):
+    def get_x_from_kg(self, R=10, T = 3, a=4):
         kgs = []
-        T = 3
         xs = []
         for r in range(1, R):
             x_r = self.generate_x(1)
             x = [x_r]
             for t in range(1, T):
                 # Get the mean and variance of the derivative
-                start = time.time()
                 G = self.kg_gradient(x[t - 1], 5)
-                end = time.time()
-                #print(f'kg_gradient: {end - start}s')
                 alpha_t = a / (a + t)
                 # Gradient ascent
                 x_t = x[t - 1] + alpha_t * G
                 x.append(x_t)
-            start = time.time()
             kgs.append(self.kg_computation(x_t))
-            end = time.time()
-            #print(f'kg_computation: {end - start}s')
             xs.append(x_t)
         # Return x_t with largest KG
         kgs_t = torch.tensor(kgs, device=self.device)
@@ -205,8 +172,6 @@ class BayesianOptimization:
 
 
     def compute_sigma_tilde_with_gradient(self, xs, x1):
-
-
         term1 = self.ln_model.covar_module(x1, xs).to_dense()
         auto_covar = self.ln_model.covar_module(xs, xs).to_dense()
         #auto_covar + variance where variance is an hyperparameter
@@ -232,12 +197,10 @@ class BayesianOptimization:
     def compute_grad_L0(self, x):
         x = deepcopy(x)
         x1 = self.compute_min_x1_objective(x)
-        return self.sample_gradient(x1)
+        return self.sample_l0_gradient(x1)
 
     # Computes min x' of posterior returning x' and objective function min value
     def compute_min_x1_posterior(self, x):
-
-
         bounds = self.bounds
         bounds = {"lb": torch.zeros(bounds[:, 0].shape), "ub": torch.ones(bounds[:, 1].shape)}
         bounds['lb'][-2:] = 1.0
@@ -273,11 +236,7 @@ class BayesianOptimization:
     # Computation of dLn = En[g(x',1) | y(x,S)]
     def compute_dLn(self, x1):
 
-        #mean, variance = self.predict(x1)
         mean = self.sample_ln_posterior(x1)
-        #xs = deepcopy(self.x)
-        #x1 = torch.repeat_interleave(x1, xs.shape[0], dim=0)
-        #xs.requires_grad_(True)
         sigma_tilde = self.compute_sigma_tilde_with_gradient(self.x, x1)
         dLn = mean + sigma_tilde
         return dLn
@@ -290,16 +249,13 @@ class BayesianOptimization:
         temp_y = self.y
 
         for r in range(R):
-            g = self.predict(x_r, x_r.shape[0], self.model, self.likelihood)
-            # Simulate y = g(x) + eps
+            g = self.sample_posterior_batch(x_r, x_r.shape[0], self.model, self.likelihood)
             y = g
             temp_x = torch.cat([temp_x, x_r])
             temp_y = torch.cat([temp_y, y])
             self.model.set_train_data(temp_x, temp_y, strict=False)
             # Compute min x' and f_min
             x_min, f_min = self.compute_min_x1_posterior(x_r)
-            #print(x_min)
-            #self.model = self.model.get_fantasy_model(x_min, f_min.unsqueeze(0).unsqueeze(0))
             Ln[r] = f_min
         return Ln.mean()
 
@@ -325,7 +281,7 @@ class BayesianOptimization:
         gradLn = G0 - G
         return gradLn
 
-    def correct_bounds(self,x):
+    def correct_bounds(self, x):
         for i in range(len(x[0])):
             if x[0][i] <= 0:
                 x[0][i] = 0.001
@@ -335,18 +291,10 @@ class BayesianOptimization:
         x[0][-1] = self.bounds[-1, 0] / 10000
         return x
 
-    def save_log(self, xs, takgs, x, takg):
-        with open("res3.txt","a") as f:
-            f.write(f'x: {xs}\n')
-            f.write(f'takg: {takgs}\n')
-            f.write(f'Best x: {x}\n')
-            f.write(f'Best takg: {takg}\n')
-            f.write(f"-----------------------------------------------------------\n")
-
     def fid1(self, x):
         x1 = deepcopy(x)
         for b in range(x1.shape[0]):
-            x[b,-self.n_fidel:] = 1#self.bounds[-self.n_fidel:, 1]
+            x[b,-self.n_fidel:] = 1
         return x1
 
 
@@ -368,16 +316,14 @@ class BayesianOptimization:
             gradLn[-self.n_fidel:] = 0
             x_star = x_star + 0.01 * gradLn
             xkg.append(x_star)
-            y = self.predict(x_star, x_star.shape[0], self.ln_model, self.ln_likelihood)
+            y = self.sample_posterior_batch(x_star, x_star.shape[0], self.ln_model, self.ln_likelihood)
             temp_x = torch.cat((temp_x, x_star))
             y_next = y
             temp_y = torch.cat((temp_y, y_next))
             self.ln_model.set_train_data(temp_x, temp_y, strict=False)
 
-
         kgs_t = torch.tensor(takgs, device=self.device)
         res = xkg[torch.argmax(kgs_t)]
-        self.save_log(xkg, takgs, res, torch.max(kgs_t))
         return res
 
     # Generate x constrained by self.bounds and of dimension sample_size
@@ -418,15 +364,15 @@ class BayesianOptimization:
             observed_pred = self.likelihood(self.model(x))
         return observed_pred.rsample(sample_shape=torch.Size([1])).squeeze(0).squeeze(0)
 
-    def sample_ln_posterior(self,x):
+    def sample_ln_posterior(self, x):
         self.ln_model.eval()
         self.ln_likelihood.eval()
         with gpytorch.settings.fast_pred_var():
             observed_pred = self.ln_likelihood(self.ln_model(x))
         return observed_pred.rsample(sample_shape=torch.Size([1])).squeeze(0).squeeze(0)
 
-    # Predicts mean and variance of gaussian process on point x
-    def predict(self, x, sample_size, model,likelihood):
+    # Predicts
+    def sample_posterior_batch(self, x, sample_size, model, likelihood):
         model.eval()
         likelihood.eval()
         with gpytorch.settings.fast_pred_var():
@@ -436,7 +382,7 @@ class BayesianOptimization:
 
     # Optimizes objective function
     def optimize(self, num_iter):
-        cost = 0
+        c = 0.0
         for _ in tqdm(range(num_iter)):
             # Acquire most likely X
             x_next = self.acquisition_function()
@@ -447,7 +393,7 @@ class BayesianOptimization:
             # Heavy function call
             for i in range(x_next.shape[0]):
                 g_nexts[i] = self.objective(x_next[i], self.bounds)
-                cost += self.cost(x_next[i])
+                c += self.cost(x_next[i])
             g_nexts = g_nexts.float().to(self.device)
 
             # Add new data points to X and Y
@@ -461,4 +407,4 @@ class BayesianOptimization:
         best_idx = torch.argmin(self.y)
         self.best_x = self.x[best_idx]
         self.best_y = self.y[best_idx]
-        return self.best_x, self.best_y, cost, self.x, self.y
+        return self.best_x, self.best_y, c, self.x, self.y
